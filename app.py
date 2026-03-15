@@ -28,7 +28,9 @@ def load_data():
 
     # Merge Results with Athlete Names and Race Info
     df_merged = pd.merge(df_results, df_athletes, on='Athlete_ID', how='left')
-    df_merged = pd.merge(df_merged, df_races, on='Race_ID', how='left')
+    
+    # We add 'suffixes' here to handle the duplicate 'Gender' and 'Prov' columns
+    df_merged = pd.merge(df_merged, df_races, on='Race_ID', how='left', suffixes=('_Athlete', '_Race'))
 
     # Format the Time nicely
     def format_time(h, m, s):
@@ -43,8 +45,17 @@ def load_data():
     df_merged['Total_Seconds'] = (df_merged['Hour'] * 3600) + (df_merged['Min'] * 60) + df_merged['Sec']
 
     # Keep only the columns we want the public to see
-    display_cols = ['Name', 'Gender', 'Mark', 'Distance', 'Date', 'City', 'Prov', 'Total_Seconds']
-    return df_merged[display_cols]
+    # We specify the Athlete's gender and the Race's province
+    display_cols = ['Name', 'Gender_Athlete', 'Mark', 'Distance', 'Date', 'City', 'Prov_Race', 'Total_Seconds']
+    df_clean = df_merged[display_cols]
+    
+    # Rename them back to clean names for the website display
+    df_clean = df_clean.rename(columns={
+        'Gender_Athlete': 'Gender',
+        'Prov_Race': 'Prov'
+    })
+    
+    return df_clean
 
 # 4. Building the User Interface
 st.title("Canadian Racewalking Database")
