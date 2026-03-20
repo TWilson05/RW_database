@@ -58,39 +58,55 @@ def calculate_wa_points(gender, dist_num, surface, seconds, wa_table):
     if g_key not in wa_table:
         return 0
         
-    # Determine the exact WA Event Key based on the surface
     surf = str(surface).strip().upper()
     is_road = (surf == 'ROAD')
     
-    event_key = ""
+    # Official WA Rule: Road times are rounded UP to the nearest full second for scoring
+    scoring_seconds = math.ceil(seconds) if is_road else seconds
+
+    # Generate an array of possible keys to ensure we catch the JSON dictionary
+    possible_keys = []
+    
     if is_road:
         if dist_float == 21.1:
-            event_key = "HMW"
+            possible_keys = ["HMW", "HMW ", "Half Marathon W"]
         elif dist_float == 42.2:
-            event_key = "MarW"
-        elif dist_float.is_integer():
-            event_key = f"{int(dist_float)}km W"
+            possible_keys = ["MarW", "MarW ", "Marathon W"]
         else:
-            event_key = f"{dist_float}km W"
+            base = int(dist_float) if dist_float.is_integer() else dist_float
+            possible_keys = [
+                f"{base}km W",     # Primary target: 20km W
+                f"{base}kmW",      # Fallback 1: 20kmW
+                f"{base} km W",    # Fallback 2: 20 km W
+                f"{base}km"        # Fallback 3: 20km
+            ]
     else:
-        # Track or Indoor formatting
         meters = int(dist_float * 1000)
         if meters >= 10000:
-            # Adds the comma for 10,000mW, 20,000mW, etc.
-            event_key = f"{meters:,}mW"
+            possible_keys = [
+                f"{meters:,}mW",   # Primary target: 10,000mW
+                f"{meters}mW"      # Fallback 1: 10000mW
+            ]
         else:
-            # No comma for 3000mW and 5000mW
-            event_key = f"{meters}mW"
+            possible_keys = [
+                f"{meters}mW",     # Primary target: 5000mW
+                f"{meters:,}mW"    # Fallback 1: 5,000mW
+            ]
             
-    # Lookup the thresholds
-    thresholds = wa_table[g_key].get(event_key)
-    
+    # Try all possible key variations to find the correct threshold list
+    thresholds = None
+    for pk in possible_keys:
+        if pk in wa_table[g_key]:
+            thresholds = wa_table[g_key][pk]
+            break
+            
     if not thresholds:
         return 0
 
     # Binary search to find the correct points threshold
-    idx = bisect.bisect_left(thresholds, seconds)
+    idx = bisect.bisect_left(thresholds, scoring_seconds)
     
+    # Check if they scored at least 1 point
     if idx < len(thresholds):
         points = 1400 - idx
         return max(0, points)
@@ -155,7 +171,7 @@ def load_data():
         total_s = row['Exact_Seconds']
         surface = str(row['Surface']).strip().upper()
         
-        if surface == 'Road':
+        if surface == 'ROAD':
             total_s = math.ceil(total_s)
             hh = int(total_s // 3600)
             mm = int((total_s % 3600) // 60)
