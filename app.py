@@ -17,7 +17,7 @@ def get_gspread_client():
     creds = Credentials.from_service_account_info(credentials_dict, scopes=scopes)
     return gspread.authorize(creds)
 
-# Helper function to map distances to clean strings
+# Helper function to map distances to clean strings for the UI dropdown
 def format_distance_string(d):
     try:
         d_float = float(d)
@@ -41,8 +41,8 @@ def load_wa_table():
     except FileNotFoundError:
         return {}
 
-# Calculate WA Points based on exact seconds
-def calculate_wa_points(gender, dist_num, seconds, wa_table):
+# Calculate WA Points based on exact seconds AND surface
+def calculate_wa_points(gender, dist_num, surface, seconds, wa_table):
     try:
         dist_float = float(dist_num)
     except ValueError:
@@ -52,36 +52,45 @@ def calculate_wa_points(gender, dist_num, seconds, wa_table):
     if dist_float < 3:
         return 0
         
-    # Map the database Gender (Male/Female) to the JSON Gender (Men/Women)
+    # Map the database Gender to the JSON Gender
     g_key = "Men" if str(gender).strip().lower() in ['male', 'm', 'men'] else "Women"
     
     if g_key not in wa_table:
         return 0
         
-    # Generate possible JSON keys for the event
-    base_dist_str = f"{int(dist_float)}km" if dist_float.is_integer() else f"{dist_float}km"
-    possible_keys = [
-        base_dist_str,             # e.g., "20km"
-        f"{base_dist_str}W",       # e.g., "20kmW"
-        f"{base_dist_str} Walk",   # e.g., "20km Walk"
-        f"{base_dist_str} Race Walk"
-    ]
+    # Determine the exact WA Event Key based on the surface
+    surf = str(surface).strip().upper()
+    is_road = (surf == 'ROAD')
     
-    thresholds = None
-    for key in possible_keys:
-        if key in wa_table[g_key]:
-            thresholds = wa_table[g_key][key]
-            break
+    event_key = ""
+    if is_road:
+        if dist_float == 21.1:
+            event_key = "HMW"
+        elif dist_float == 42.2:
+            event_key = "MarW"
+        elif dist_float.is_integer():
+            event_key = f"{int(dist_float)}km W"
+        else:
+            event_key = f"{dist_float}km W"
+    else:
+        # Track or Indoor formatting
+        meters = int(dist_float * 1000)
+        if meters >= 10000:
+            # Adds the comma for 10,000mW, 20,000mW, etc.
+            event_key = f"{meters:,}mW"
+        else:
+            # No comma for 3000mW and 5000mW
+            event_key = f"{meters}mW"
             
+    # Lookup the thresholds
+    thresholds = wa_table[g_key].get(event_key)
+    
     if not thresholds:
         return 0
 
     # Binary search to find the correct points threshold
-    # thresholds array is sorted ascending (fastest time first).
-    # bisect_left finds the first index where the threshold time is >= the athlete's time.
     idx = bisect.bisect_left(thresholds, seconds)
     
-    # 1400 points is index 0. If they miss the lowest point threshold, return 0.
     if idx < len(thresholds):
         points = 1400 - idx
         return max(0, points)
@@ -114,6 +123,7 @@ def load_data():
     # --- MERGING SPLITS ---
     if not df_splits.empty:
         df_splits_expanded = pd.merge(df_splits, df_results[['Result_ID', 'Athlete_ID', 'Team_ID', 'Race_ID', 'Rank']], on='Result_ID', how='inner')
+        # Drop the race distance so it doesn't overwrite the split distance, but keep the Surface
         df_splits_expanded = pd.merge(df_splits_expanded, df_races.drop(columns=['Distance']), on='Race_ID', how='left')
         df_splits_expanded['Is_Split'] = True
         df_all = pd.concat([df_main, df_splits_expanded], ignore_index=True)
@@ -136,7 +146,7 @@ def load_data():
 
     # --- WA POINTS CALCULATION ---
     df_all['WA Points'] = df_all.apply(
-        lambda row: calculate_wa_points(row['Gender'], row['Distance'], row['Exact_Seconds'], wa_table), 
+        lambda row: calculate_wa_points(row['Gender'], row['Distance'], row['Surface'], row['Exact_Seconds'], wa_table), 
         axis=1
     )
 
@@ -229,7 +239,7 @@ for is_pb in filtered_data['Is_PB']:
 filtered_data.insert(0, 'Order', ranks)
 filtered_data = filtered_data.rename(columns={'Location': 'Competition Location'})
 
-# Reorder columns to place WA Points immediately after the Mark
+# Reorder columns for the final display
 final_display_columns = ['Order', 'Mark', 'WA Points', 'Name', 'YOB', 'Team', 'Date', 'Competition Location', 'Is_PB']
 display_data = filtered_data[final_display_columns]
 
