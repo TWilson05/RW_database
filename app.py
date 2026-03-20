@@ -64,9 +64,9 @@ def calculate_wa_points(gender, dist_num, surface, seconds, wa_table):
     possible_keys = []
     
     if is_road:
-        if dist_float == 21.1:
+        if round(dist_float,1) == 21.1:
             possible_keys = ["HMW", "HMW ", "Half Marathon W"]
-        elif dist_float == 42.2:
+        elif round(dist_float,1) == 42.2:
             possible_keys = ["MarW", "MarW ", "Marathon W"]
         else:
             base = int(dist_float) if dist_float.is_integer() else dist_float
