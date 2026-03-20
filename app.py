@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import gspread
+import math
 from google.oauth2.service_account import Credentials
 
 # 1. Page Config
@@ -9,98 +10,131 @@ st.set_page_config(page_title="Canadian Racewalk Database", layout="wide")
 # 2. Secure Google Sheets Connection
 @st.cache_resource
 def get_gspread_client():
-    # Streamlit securely pulls this from your Cloud settings, NOT your public code
     credentials_dict = st.secrets["gcp_service_account"]
     scopes = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
     creds = Credentials.from_service_account_info(credentials_dict, scopes=scopes)
     return gspread.authorize(creds)
 
-# 3. Load and Merge Data
-@st.cache_data(ttl=600) # Caches the data for 10 minutes
+# 3. Load, Merge, and Clean Data
+@st.cache_data(ttl=600)
 def load_data():
     gc = get_gspread_client()
-    sh = gc.open("Canadian Racewalk") # Ensure this matches your sheet name
+    sh = gc.open("Canadian Racewalk")
 
     # Pull the tables
     df_athletes = pd.DataFrame(sh.worksheet('Athletes').get_all_records())
     df_races = pd.DataFrame(sh.worksheet('Races').get_all_records())
     df_results = pd.DataFrame(sh.worksheet('Results').get_all_records())
+    df_teams = pd.DataFrame(sh.worksheet('Teams').get_all_records())
 
-    # Merge Results with Athlete Names and Race Info
+    # --- MERGING ---
+    # Merge Results with Athletes
     df_merged = pd.merge(df_results, df_athletes, on='Athlete_ID', how='left')
-    df_merged = pd.merge(df_merged, df_races, on='Race_ID', how='left', suffixes=('_Athlete', '_Race'))
-
-    # Format the Time nicely
-    def format_time(h, m, s):
-        if h > 0:
-            return f"{int(h)}:{int(m):02d}:{float(s):04.1f}"
-        else:
-            return f"{int(m):02d}:{float(s):04.1f}"
-
-    df_merged['Mark'] = df_merged.apply(lambda row: format_time(row['Hour'], row['Min'], row['Sec']), axis=1)
     
-    # Calculate Total Seconds for accurate sorting
-    df_merged['Total_Seconds'] = (df_merged['Hour'] * 3600) + (df_merged['Min'] * 60) + df_merged['Sec']
+    # Merge with Races (Handles duplicate 'Prov' and 'Gender' columns)
+    df_merged = pd.merge(df_merged, df_races, on='Race_ID', how='left', suffixes=('_Athlete', '_Race'))
+    
+    # Merge with Teams (Handles duplicate 'Name' columns: Athlete Name vs Team Name)
+    df_merged = pd.merge(df_merged, df_teams, on='Team_ID', how='left', suffixes=('', '_Team'))
+    df_merged['Team'] = df_merged['Name_Team'].fillna('Unattached')
 
-    # --- DATA CLEANUP ---
-    # 1. Filter out DQs, DNFs, and any blank times (0 seconds)
+    # --- FILTERING ---
+    # 1. Only Canadian Athletes
+    df_merged = df_merged[df_merged['Nationality'].str.upper() == 'CAN']
+
+    # 2. Filter out DQs, DNFs
     df_merged = df_merged[~df_merged['Rank'].astype(str).str.upper().isin(['DQ', 'DNF'])]
-    df_merged = df_merged[df_merged['Total_Seconds'] > 0]
 
-    # 2. Extract the Year from the Date column for our new filter
+    # Calculate exact total seconds first for accurate math/sorting
+    df_merged['Exact_Seconds'] = (df_merged['Hour'] * 3600) + (df_merged['Min'] * 60) + df_merged['Sec']
+    df_merged = df_merged[df_merged['Exact_Seconds'] > 0]
+
+    # --- FORMATTING ---
+    # Smart Time Formatting (Road vs Track)
+    def format_mark(row):
+        total_s = row['Exact_Seconds']
+        surface = str(row['Surface']).strip().upper()
+        
+        if surface == 'ROAD':
+            # Track & Field Rules: Road times round UP to the nearest full second
+            total_s = math.ceil(total_s)
+            hh = int(total_s // 3600)
+            mm = int((total_s % 3600) // 60)
+            ss = int(total_s % 60)
+            if hh > 0:
+                return f"{hh}:{mm:02d}:{ss:02d}"
+            return f"{mm:02d}:{ss:02d}"
+        else:
+            # Track/Indoor: Keep up to 2 decimal places (.00)
+            hh = int(total_s // 3600)
+            mm = int((total_s % 3600) // 60)
+            ss = total_s % 60
+            if hh > 0:
+                return f"{hh}:{mm:02d}:{ss:05.2f}"
+            return f"{mm:02d}:{ss:05.2f}"
+            
+    df_merged['Mark'] = df_merged.apply(format_mark, axis=1)
+
+    # Smart Location Formatting (CAN/USA vs International)
+    def format_location(row):
+        country = str(row['Country']).strip().upper()
+        city = str(row['City']).strip()
+        prov = str(row['Prov_Race']).strip()
+        
+        if country in ['CAN', 'USA']:
+            return f"{city}, {prov}"
+        return f"{city}, {country}"
+
+    df_merged['Location'] = df_merged.apply(format_location, axis=1)
+
+    # Extract Year
     df_merged['Year'] = pd.to_datetime(df_merged['Date'], errors='coerce').dt.year
 
-    # Keep only the columns we want to work with
-    display_cols = ['Name', 'Gender_Athlete', 'Mark', 'Distance', 'Date', 'City', 'Prov_Race', 'Total_Seconds', 'Year']
-    df_clean = df_merged[display_cols]
-    
-    # Rename them back to clean names for the website display
-    df_clean = df_clean.rename(columns={
-        'Gender_Athlete': 'Gender',
-        'Prov_Race': 'Prov'
-    })
+    # Keep only the columns needed for the backend and the final display
+    backend_cols = ['Name', 'Gender_Athlete', 'Mark', 'Distance', 'Date', 'Location', 'Exact_Seconds', 'Year', 'YOB', 'Team']
+    df_clean = df_merged[backend_cols].rename(columns={'Gender_Athlete': 'Gender'})
     
     return df_clean
 
 # 4. Building the User Interface
 st.title("Canadian Racewalking Database")
-st.write("All-time performances and historical results.")
+st.write("All-time performances for Canadian athletes.")
 
 data = load_data()
 
 # Sidebar Filters
 st.sidebar.header("Filter Results")
 
-# Distance Filter (Removed "All" - defaults to the first distance in the list)
+# Distance Filter (Defaults to the first distance)
 distances = sorted(data['Distance'].dropna().unique().tolist())
 selected_dist = st.sidebar.selectbox("Distance", distances)
 
-# Gender Filter (Removed "All" - defaults to Male/Female based on your Athletes table)
+# Gender Filter (Defaults to the first gender)
 genders = sorted(data['Gender'].dropna().unique().tolist())
 selected_gender = st.sidebar.selectbox("Gender", genders)
 
 # Year Filter (Includes "All Years")
-# We convert the years to integers to remove the ".0" decimal that Pandas sometimes adds
 years = sorted(data['Year'].dropna().astype(int).unique().tolist(), reverse=True)
 selected_year = st.sidebar.selectbox("Year", ["All Years"] + years)
 
 # Apply the Filters
-# We strictly filter by Distance and Gender first
 filtered_data = data[
     (data['Distance'] == selected_dist) & 
     (data['Gender'] == selected_gender)
 ].copy()
 
-# Then we filter by Year if a specific year is chosen
 if selected_year != "All Years":
     filtered_data = filtered_data[filtered_data['Year'] == selected_year]
 
-# Sort by fastest time and drop the backend tracking columns
-filtered_data = filtered_data.sort_values(by='Total_Seconds').reset_index(drop=True)
-display_data = filtered_data.drop(columns=['Total_Seconds', 'Year'])
+# Sort by the fastest EXACT time
+filtered_data = filtered_data.sort_values(by='Exact_Seconds').reset_index(drop=True)
 
-# Make the row numbers act as actual rankings (1, 2, 3...)
-display_data.index += 1 
+# Create the specific display columns requested
+filtered_data.insert(0, 'Order', range(1, len(filtered_data) + 1)) # Creates 1, 2, 3...
+filtered_data = filtered_data.rename(columns={'Location': 'Competition Location'})
 
-# Display the Table
-st.dataframe(display_data, use_container_width=True)
+final_display_columns = ['Order', 'Mark', 'Name', 'YOB', 'Team', 'Date', 'Competition Location']
+display_data = filtered_data[final_display_columns]
+
+# Display the Table (hide_index=True removes the default pandas row numbers since we made an 'Order' column)
+st.dataframe(display_data, use_container_width=True, hide_index=True)
