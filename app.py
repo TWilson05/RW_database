@@ -64,14 +64,14 @@ def calculate_wa_points(gender, dist_num, surface, seconds, wa_table):
     possible_keys = []
     
     if is_road:
-        if round(dist_float,1) == 21.1:
+        if int(dist_float * 10) == 211:
             possible_keys = ["HMW", "HMW ", "Half Marathon W"]
-        elif round(dist_float,1) == 42.2:
+        elif int(dist_float * 10) == 422:
             possible_keys = ["MarW", "MarW ", "Marathon W"]
         else:
             base = int(dist_float) if dist_float.is_integer() else dist_float
             possible_keys = [
-                f"{base}km W", f"{base}kmW", f"{base} km W", f"{base}km"
+                f"{base}km W", f"{base}kmW", f"{base} km W"
             ]
     else:
         meters = int(dist_float * 1000)
