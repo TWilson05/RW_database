@@ -59,7 +59,7 @@ def calculate_wa_points(gender, dist_num, surface, seconds, wa_table):
         return 0
         
     surf = str(surface).strip().upper()
-    is_road = (surf == 'ROAD')
+    is_road = (surf == 'Road')
     
     # Official WA Rule: Road times are rounded UP to the nearest full second for scoring
     scoring_seconds = math.ceil(seconds) if is_road else seconds
@@ -171,7 +171,7 @@ def load_data():
         total_s = row['Exact_Seconds']
         surface = str(row['Surface']).strip().upper()
         
-        if surface == 'ROAD':
+        if surface == 'Road':
             total_s = math.ceil(total_s)
             hh = int(total_s // 3600)
             mm = int((total_s % 3600) // 60)
