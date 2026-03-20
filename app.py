@@ -171,7 +171,7 @@ def load_data():
         total_s = row['Exact_Seconds']
         surface = str(row['Surface']).strip().upper()
         
-        if surface == 'Road':
+        if surface == 'ROAD':
             total_s = math.ceil(total_s)
             hh = int(total_s // 3600)
             mm = int((total_s % 3600) // 60)
