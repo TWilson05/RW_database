@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import gspread
 import math
+import json
+import bisect
 from google.oauth2.service_account import Credentials
 
 # 1. Page Config
@@ -30,11 +32,68 @@ def format_distance_string(d):
     if d_float.is_integer(): return f"{int(d_float)}km"
     return f"{d_float}km"
 
+# Load World Athletics JSON Data
+@st.cache_data
+def load_wa_table():
+    try:
+        with open('2025_lookup_table.json', 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+# Calculate WA Points based on exact seconds
+def calculate_wa_points(gender, dist_num, seconds, wa_table):
+    try:
+        dist_float = float(dist_num)
+    except ValueError:
+        return 0
+        
+    # Ignore events under 3km
+    if dist_float < 3:
+        return 0
+        
+    # Map the database Gender (Male/Female) to the JSON Gender (Men/Women)
+    g_key = "Men" if str(gender).strip().lower() in ['male', 'm', 'men'] else "Women"
+    
+    if g_key not in wa_table:
+        return 0
+        
+    # Generate possible JSON keys for the event
+    base_dist_str = f"{int(dist_float)}km" if dist_float.is_integer() else f"{dist_float}km"
+    possible_keys = [
+        base_dist_str,             # e.g., "20km"
+        f"{base_dist_str}W",       # e.g., "20kmW"
+        f"{base_dist_str} Walk",   # e.g., "20km Walk"
+        f"{base_dist_str} Race Walk"
+    ]
+    
+    thresholds = None
+    for key in possible_keys:
+        if key in wa_table[g_key]:
+            thresholds = wa_table[g_key][key]
+            break
+            
+    if not thresholds:
+        return 0
+
+    # Binary search to find the correct points threshold
+    # thresholds array is sorted ascending (fastest time first).
+    # bisect_left finds the first index where the threshold time is >= the athlete's time.
+    idx = bisect.bisect_left(thresholds, seconds)
+    
+    # 1400 points is index 0. If they miss the lowest point threshold, return 0.
+    if idx < len(thresholds):
+        points = 1400 - idx
+        return max(0, points)
+        
+    return 0
+
 # 3. Load, Merge, and Clean Data
 @st.cache_data(ttl=600)
 def load_data():
     gc = get_gspread_client()
     sh = gc.open("Canadian Racewalk")
+    wa_table = load_wa_table()
 
     # Pull the core tables
     df_athletes = pd.DataFrame(sh.worksheet('Athletes').get_all_records())
@@ -75,6 +134,12 @@ def load_data():
     df_all['Exact_Seconds'] = (df_all['Hour'] * 3600) + (df_all['Min'] * 60) + df_all['Sec']
     df_all = df_all[df_all['Exact_Seconds'] > 0]
 
+    # --- WA POINTS CALCULATION ---
+    df_all['WA Points'] = df_all.apply(
+        lambda row: calculate_wa_points(row['Gender'], row['Distance'], row['Exact_Seconds'], wa_table), 
+        axis=1
+    )
+
     # --- FORMATTING FUNCTIONS ---
     def format_mark(row):
         total_s = row['Exact_Seconds']
@@ -112,7 +177,7 @@ def load_data():
 
     df_all['Year'] = pd.to_datetime(df_all['Date'], errors='coerce').dt.year
 
-    backend_cols = ['Name', 'Gender', 'Mark', 'Distance', 'Date', 'Location', 'Exact_Seconds', 'Year', 'YOB', 'Team']
+    backend_cols = ['Name', 'Gender', 'Mark', 'WA Points', 'Distance', 'Date', 'Location', 'Exact_Seconds', 'Year', 'YOB', 'Team']
     return df_all[backend_cols]
 
 # 4. Building the User Interface
@@ -149,11 +214,9 @@ if selected_year != "All Years":
 # Sort by the fastest EXACT time
 filtered_data = filtered_data.sort_values(by='Exact_Seconds').reset_index(drop=True)
 
-# --- NEW LOGIC: Identify PBs and Rank ---
-# Flag the first occurrence of each name as their Personal Best (PB)
+# --- Identify PBs and Rank ---
 filtered_data['Is_PB'] = ~filtered_data.duplicated(subset=['Name'], keep='first')
 
-# Create the specific Order column
 ranks = []
 current_rank = 1
 for is_pb in filtered_data['Is_PB']:
@@ -161,23 +224,21 @@ for is_pb in filtered_data['Is_PB']:
         ranks.append(str(current_rank))
         current_rank += 1
     else:
-        ranks.append("") # Leave blank if it's not a PB
+        ranks.append("") 
 
 filtered_data.insert(0, 'Order', ranks)
 filtered_data = filtered_data.rename(columns={'Location': 'Competition Location'})
 
-# We keep 'Is_PB' in this list temporarily so the styler can read it
-final_display_columns = ['Order', 'Mark', 'Name', 'YOB', 'Team', 'Date', 'Competition Location', 'Is_PB']
+# Reorder columns to place WA Points immediately after the Mark
+final_display_columns = ['Order', 'Mark', 'WA Points', 'Name', 'YOB', 'Team', 'Date', 'Competition Location', 'Is_PB']
 display_data = filtered_data[final_display_columns]
 
-# --- NEW LOGIC: Apply Bold Styling ---
+# --- Apply Bold Styling ---
 def highlight_pb(row):
-    # If the row is a PB, return CSS to bold every column in that row
     if row['Is_PB']:
         return ['font-weight: bold'] * len(row)
     return [''] * len(row)
 
-# Apply the style, then hide the 'Is_PB' tracking column and the default index
 styled_dataframe = (
     display_data.style
     .apply(highlight_pb, axis=1)
@@ -185,5 +246,4 @@ styled_dataframe = (
     .hide(axis="index")
 )
 
-# Display the styled Table
 st.dataframe(styled_dataframe, use_container_width=True)
