@@ -17,7 +17,7 @@ def get_gspread_client():
     creds = Credentials.from_service_account_info(credentials_dict, scopes=scopes)
     return gspread.authorize(creds)
 
-# Helper function to map distances to clean strings for the UI dropdown
+# Helper function to map distances to clean strings
 def format_distance_string(d):
     try:
         d_float = float(d)
@@ -41,30 +41,26 @@ def load_wa_table():
     except FileNotFoundError:
         return {}
 
-# Calculate WA Points based on exact seconds AND surface
+# Calculate WA Points
 def calculate_wa_points(gender, dist_num, surface, seconds, wa_table):
     try:
         dist_float = float(dist_num)
     except ValueError:
         return 0
         
-    # Ignore events under 3km
     if dist_float < 3:
         return 0
         
-    # Map the database Gender to the JSON Gender
     g_key = "Men" if str(gender).strip().lower() in ['male', 'm', 'men'] else "Women"
     
     if g_key not in wa_table:
         return 0
         
-    surf = str(surface).strip().upper()
+    surf = str(surface).strip().title()
     is_road = (surf == 'Road')
     
-    # Official WA Rule: Road times are rounded UP to the nearest full second for scoring
     scoring_seconds = math.ceil(seconds) if is_road else seconds
 
-    # Generate an array of possible keys to ensure we catch the JSON dictionary
     possible_keys = []
     
     if is_road:
@@ -75,25 +71,15 @@ def calculate_wa_points(gender, dist_num, surface, seconds, wa_table):
         else:
             base = int(dist_float) if dist_float.is_integer() else dist_float
             possible_keys = [
-                f"{base}km W",     # Primary target: 20km W
-                f"{base}kmW",      # Fallback 1: 20kmW
-                f"{base} km W",    # Fallback 2: 20 km W
-                f"{base}km"        # Fallback 3: 20km
+                f"{base}km W", f"{base}kmW", f"{base} km W", f"{base}km"
             ]
     else:
         meters = int(dist_float * 1000)
         if meters >= 10000:
-            possible_keys = [
-                f"{meters:,}mW",   # Primary target: 10,000mW
-                f"{meters}mW"      # Fallback 1: 10000mW
-            ]
+            possible_keys = [f"{meters:,}mW", f"{meters}mW"]
         else:
-            possible_keys = [
-                f"{meters}mW",     # Primary target: 5000mW
-                f"{meters:,}mW"    # Fallback 1: 5,000mW
-            ]
+            possible_keys = [f"{meters}mW", f"{meters:,}mW"]
             
-    # Try all possible key variations to find the correct threshold list
     thresholds = None
     for pk in possible_keys:
         if pk in wa_table[g_key]:
@@ -103,10 +89,8 @@ def calculate_wa_points(gender, dist_num, surface, seconds, wa_table):
     if not thresholds:
         return 0
 
-    # Binary search to find the correct points threshold
     idx = bisect.bisect_left(thresholds, scoring_seconds)
     
-    # Check if they scored at least 1 point
     if idx < len(thresholds):
         points = 1400 - idx
         return max(0, points)
@@ -120,58 +104,49 @@ def load_data():
     sh = gc.open("Canadian Racewalk")
     wa_table = load_wa_table()
 
-    # Pull the core tables
     df_athletes = pd.DataFrame(sh.worksheet('Athletes').get_all_records())
     df_races = pd.DataFrame(sh.worksheet('Races').get_all_records())
     df_results = pd.DataFrame(sh.worksheet('Results').get_all_records())
     df_teams = pd.DataFrame(sh.worksheet('Teams').get_all_records())
     
-    # Attempt to pull Splits
     try:
         df_splits = pd.DataFrame(sh.worksheet('Splits').get_all_records())
     except gspread.exceptions.WorksheetNotFound:
         df_splits = pd.DataFrame(columns=['Result_ID', 'Distance', 'Hour', 'Min', 'Sec'])
 
-    # --- MERGING MAIN RESULTS ---
     df_main = pd.merge(df_results, df_races, on='Race_ID', how='left', suffixes=('', '_Race'))
     df_main['Is_Split'] = False
 
-    # --- MERGING SPLITS ---
     if not df_splits.empty:
         df_splits_expanded = pd.merge(df_splits, df_results[['Result_ID', 'Athlete_ID', 'Team_ID', 'Race_ID', 'Rank']], on='Result_ID', how='inner')
-        # Drop the race distance so it doesn't overwrite the split distance, but keep the Surface
         df_splits_expanded = pd.merge(df_splits_expanded, df_races.drop(columns=['Distance']), on='Race_ID', how='left')
         df_splits_expanded['Is_Split'] = True
         df_all = pd.concat([df_main, df_splits_expanded], ignore_index=True)
     else:
         df_all = df_main
 
-    # --- FINAL METADATA MERGES ---
     df_all = pd.merge(df_all, df_athletes, on='Athlete_ID', how='left', suffixes=('_Race', '_Athlete'))
     df_all = df_all.rename(columns={'Gender_Athlete': 'Gender'})
     
     df_all = pd.merge(df_all, df_teams, on='Team_ID', how='left', suffixes=('', '_Team'))
     df_all['Team'] = df_all['Name_Team'].fillna('Unattached')
 
-    # --- DATA CLEANING & RULES ---
     df_all = df_all[df_all['Nationality'].str.upper() == 'CAN']
     df_all = df_all[~df_all['Rank'].astype(str).str.upper().isin(['DQ', 'DNF'])]
 
     df_all['Exact_Seconds'] = (df_all['Hour'] * 3600) + (df_all['Min'] * 60) + df_all['Sec']
     df_all = df_all[df_all['Exact_Seconds'] > 0]
 
-    # --- WA POINTS CALCULATION ---
     df_all['WA Points'] = df_all.apply(
         lambda row: calculate_wa_points(row['Gender'], row['Distance'], row['Surface'], row['Exact_Seconds'], wa_table), 
         axis=1
     )
 
-    # --- FORMATTING FUNCTIONS ---
     def format_mark(row):
         total_s = row['Exact_Seconds']
-        surface = str(row['Surface']).strip().upper()
+        surf = str(row['Surface']).strip().title()
         
-        if surface == 'ROAD':
+        if surf == 'Road':
             total_s = math.ceil(total_s)
             hh = int(total_s // 3600)
             mm = int((total_s % 3600) // 60)
@@ -212,35 +187,51 @@ st.write("All-time performances for Canadian athletes.")
 
 data = load_data()
 
-st.sidebar.header("Filter Results")
+st.sidebar.header("Filter & Sort")
 
-# --- UI Distance Logic ---
+# --- NEW: Sort Toggle ---
+sort_by = st.sidebar.radio("Sort By", ["Time", "WA Points"])
+
+# Distance Logic
 unique_numeric_dists = sorted(data['Distance'].dropna().astype(float).unique().tolist())
 display_dist_options = [format_distance_string(d) for d in unique_numeric_dists]
-selected_display_dist = st.sidebar.selectbox("Distance", display_dist_options)
-selected_numeric_dist = unique_numeric_dists[display_dist_options.index(selected_display_dist)]
 
-# Gender Filter
+# Only allow "All Distances" if they are sorting by WA points
+if sort_by == "WA Points":
+    display_dist_options = ["All Distances"] + display_dist_options
+
+selected_display_dist = st.sidebar.selectbox("Distance", display_dist_options)
+
 genders = sorted(data['Gender'].dropna().unique().tolist())
 selected_gender = st.sidebar.selectbox("Gender", genders)
 
-# Year Filter
 years = sorted(data['Year'].dropna().astype(int).unique().tolist(), reverse=True)
 selected_year = st.sidebar.selectbox("Year", ["All Years"] + years)
 
-# Apply the Filters
-filtered_data = data[
-    (data['Distance'].astype(float) == selected_numeric_dist) & 
-    (data['Gender'] == selected_gender)
-].copy()
+# --- APPLY FILTERS ---
+if selected_display_dist == "All Distances":
+    filtered_data = data[data['Gender'] == selected_gender].copy()
+else:
+    # Safely find the numeric distance value based on the selection
+    offset = 1 if sort_by == "WA Points" else 0
+    selected_numeric_dist = unique_numeric_dists[display_dist_options.index(selected_display_dist) - offset]
+    
+    filtered_data = data[
+        (data['Distance'].astype(float) == selected_numeric_dist) & 
+        (data['Gender'] == selected_gender)
+    ].copy()
 
 if selected_year != "All Years":
     filtered_data = filtered_data[filtered_data['Year'] == selected_year]
 
-# Sort by the fastest EXACT time
-filtered_data = filtered_data.sort_values(by='Exact_Seconds').reset_index(drop=True)
+# --- APPLY SORTING ---
+if sort_by == "Time":
+    filtered_data = filtered_data.sort_values(by='Exact_Seconds', ascending=True).reset_index(drop=True)
+else:
+    # Sort by WA points (highest to lowest), then exact seconds (fastest first) as a tie-breaker
+    filtered_data = filtered_data.sort_values(by=['WA Points', 'Exact_Seconds'], ascending=[False, True]).reset_index(drop=True)
 
-# --- Identify PBs and Rank ---
+# --- IDENTIFY PBs & ASSIGN RANK ---
 filtered_data['Is_PB'] = ~filtered_data.duplicated(subset=['Name'], keep='first')
 
 ranks = []
@@ -255,8 +246,16 @@ for is_pb in filtered_data['Is_PB']:
 filtered_data.insert(0, 'Order', ranks)
 filtered_data = filtered_data.rename(columns={'Location': 'Competition Location'})
 
-# Reorder columns for the final display
-final_display_columns = ['Order', 'Mark', 'WA Points', 'Name', 'YOB', 'Team', 'Date', 'Competition Location', 'Is_PB']
+# Clean up the Distance column for display so it shows "20km" instead of "20.0"
+filtered_data['Distance'] = filtered_data['Distance'].apply(format_distance_string)
+
+# --- DYNAMIC COLUMN SELECTION ---
+if sort_by == "Time":
+    final_display_columns = ['Order', 'Mark', 'WA Points', 'Name', 'YOB', 'Team', 'Date', 'Competition Location', 'Is_PB']
+else:
+    # The requested column layout for WA Points sorting
+    final_display_columns = ['Order', 'WA Points', 'Name', 'Mark', 'Distance', 'YOB', 'Team', 'Date', 'Competition Location', 'Is_PB']
+
 display_data = filtered_data[final_display_columns]
 
 # --- Apply Bold Styling ---
