@@ -16,10 +16,10 @@ def get_gspread_client():
     return gspread.authorize(creds)
 
 # 3. Load and Merge Data
-@st.cache_data(ttl=600) # Caches the data for 10 minutes so your site is lightning fast
+@st.cache_data(ttl=600) # Caches the data for 10 minutes
 def load_data():
     gc = get_gspread_client()
-    sh = gc.open("Canadian Racewalk") # Ensure this exactly matches your sheet name
+    sh = gc.open("Canadian Racewalk") # Ensure this matches your sheet name
 
     # Pull the tables
     df_athletes = pd.DataFrame(sh.worksheet('Athletes').get_all_records())
@@ -28,8 +28,6 @@ def load_data():
 
     # Merge Results with Athlete Names and Race Info
     df_merged = pd.merge(df_results, df_athletes, on='Athlete_ID', how='left')
-    
-    # We add 'suffixes' here to handle the duplicate 'Gender' and 'Prov' columns
     df_merged = pd.merge(df_merged, df_races, on='Race_ID', how='left', suffixes=('_Athlete', '_Race'))
 
     # Format the Time nicely
@@ -44,9 +42,16 @@ def load_data():
     # Calculate Total Seconds for accurate sorting
     df_merged['Total_Seconds'] = (df_merged['Hour'] * 3600) + (df_merged['Min'] * 60) + df_merged['Sec']
 
-    # Keep only the columns we want the public to see
-    # We specify the Athlete's gender and the Race's province
-    display_cols = ['Name', 'Gender_Athlete', 'Mark', 'Distance', 'Date', 'City', 'Prov_Race', 'Total_Seconds']
+    # --- DATA CLEANUP ---
+    # 1. Filter out DQs, DNFs, and any blank times (0 seconds)
+    df_merged = df_merged[~df_merged['Rank'].astype(str).str.upper().isin(['DQ', 'DNF'])]
+    df_merged = df_merged[df_merged['Total_Seconds'] > 0]
+
+    # 2. Extract the Year from the Date column for our new filter
+    df_merged['Year'] = pd.to_datetime(df_merged['Date'], errors='coerce').dt.year
+
+    # Keep only the columns we want to work with
+    display_cols = ['Name', 'Gender_Athlete', 'Mark', 'Distance', 'Date', 'City', 'Prov_Race', 'Total_Seconds', 'Year']
     df_clean = df_merged[display_cols]
     
     # Rename them back to clean names for the website display
@@ -66,25 +71,36 @@ data = load_data()
 # Sidebar Filters
 st.sidebar.header("Filter Results")
 
-# Distance Filter
+# Distance Filter (Removed "All" - defaults to the first distance in the list)
 distances = sorted(data['Distance'].dropna().unique().tolist())
-selected_dist = st.sidebar.selectbox("Distance", ["All"] + distances)
+selected_dist = st.sidebar.selectbox("Distance", distances)
 
-# Gender Filter
+# Gender Filter (Removed "All" - defaults to Male/Female based on your Athletes table)
 genders = sorted(data['Gender'].dropna().unique().tolist())
-selected_gender = st.sidebar.selectbox("Gender", ["All"] + genders)
+selected_gender = st.sidebar.selectbox("Gender", genders)
+
+# Year Filter (Includes "All Years")
+# We convert the years to integers to remove the ".0" decimal that Pandas sometimes adds
+years = sorted(data['Year'].dropna().astype(int).unique().tolist(), reverse=True)
+selected_year = st.sidebar.selectbox("Year", ["All Years"] + years)
 
 # Apply the Filters
-filtered_data = data.copy()
-if selected_dist != "All":
-    filtered_data = filtered_data[filtered_data['Distance'] == selected_dist]
-if selected_gender != "All":
-    filtered_data = filtered_data[filtered_data['Gender'] == selected_gender]
+# We strictly filter by Distance and Gender first
+filtered_data = data[
+    (data['Distance'] == selected_dist) & 
+    (data['Gender'] == selected_gender)
+].copy()
 
-# Sort by fastest time and drop the hidden seconds column
+# Then we filter by Year if a specific year is chosen
+if selected_year != "All Years":
+    filtered_data = filtered_data[filtered_data['Year'] == selected_year]
+
+# Sort by fastest time and drop the backend tracking columns
 filtered_data = filtered_data.sort_values(by='Total_Seconds').reset_index(drop=True)
-display_data = filtered_data.drop(columns=['Total_Seconds'])
-display_data.index += 1 # Make the row numbers act as actual rankings
+display_data = filtered_data.drop(columns=['Total_Seconds', 'Year'])
+
+# Make the row numbers act as actual rankings (1, 2, 3...)
+display_data.index += 1 
 
 # Display the Table
 st.dataframe(display_data, use_container_width=True)
