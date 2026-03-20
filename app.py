@@ -46,7 +46,7 @@ def calculate_wa_points(gender, dist_num, surface, seconds, wa_table):
     try:
         dist_float = float(dist_num)
     except ValueError:
-        return 1
+        return 0
         
     if dist_float < 3:
         return 0
@@ -54,7 +54,7 @@ def calculate_wa_points(gender, dist_num, surface, seconds, wa_table):
     g_key = "Men" if str(gender).strip().lower() in ['male', 'm', 'men'] else "Women"
     
     if g_key not in wa_table:
-        return 2
+        return 0
         
     surf = str(surface).strip().title()
     is_road = (surf == 'Road')
@@ -87,7 +87,7 @@ def calculate_wa_points(gender, dist_num, surface, seconds, wa_table):
             break
             
     if not thresholds:
-        return 3
+        return 0
 
     idx = bisect.bisect_left(thresholds, scoring_seconds)
     
@@ -95,7 +95,7 @@ def calculate_wa_points(gender, dist_num, surface, seconds, wa_table):
         points = 1400 - idx
         return max(0, points)
         
-    return 4
+    return 0
 
 # 3. Load, Merge, and Clean Data
 @st.cache_data(ttl=600)
