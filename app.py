@@ -104,17 +104,24 @@ def load_data():
     sh = gc.open("Canadian Racewalk")
     wa_table = load_wa_table()
 
-    df_athletes = pd.DataFrame(sh.worksheet('Athletes').get_all_records())
-    df_races = pd.DataFrame(sh.worksheet('Races').get_all_records())
+    # Load raw tables
+    df_athletes_raw = pd.DataFrame(sh.worksheet('Athletes').get_all_records())
+    df_races_raw = pd.DataFrame(sh.worksheet('Races').get_all_records())
     df_results = pd.DataFrame(sh.worksheet('Results').get_all_records())
-    df_teams = pd.DataFrame(sh.worksheet('Teams').get_all_records())
+    df_teams_raw = pd.DataFrame(sh.worksheet('Teams').get_all_records())
     
     try:
         df_splits = pd.DataFrame(sh.worksheet('Splits').get_all_records())
     except gspread.exceptions.WorksheetNotFound:
         df_splits = pd.DataFrame(columns=['Result_ID', 'Distance', 'Hour', 'Min', 'Sec'])
 
-    df_main = pd.merge(df_results, df_races, on='Race_ID', how='left', suffixes=('', '_Race'))
+    # --- PRE-FILTER TO AVOID COLUMN COLLISIONS ---
+    # We only keep the columns we actually need for the display logic to prevent duplicate '_x' / '_y' suffixes
+    df_athletes = df_athletes_raw[['Athlete_ID', 'Name', 'Gender', 'YOB', 'Nationality']]
+    df_teams = df_teams_raw[['Team_ID', 'Name']].rename(columns={'Name': 'Team_Name'})
+    df_races = df_races_raw[['Race_ID', 'Distance', 'Date', 'City', 'Prov', 'Country', 'Surface']]
+
+    df_main = pd.merge(df_results, df_races, on='Race_ID', how='left')
     df_main['Is_Split'] = False
 
     if not df_splits.empty:
@@ -125,11 +132,10 @@ def load_data():
     else:
         df_all = df_main
 
-    df_all = pd.merge(df_all, df_athletes, on='Athlete_ID', how='left', suffixes=('_Race', '_Athlete'))
-    df_all = df_all.rename(columns={'Gender_Athlete': 'Gender'})
-    
-    df_all = pd.merge(df_all, df_teams, on='Team_ID', how='left', suffixes=('', '_Team'))
-    df_all['Team'] = df_all['Name_Team'].fillna('Unattached')
+    # Now we merge without worrying about suffixes since overlapping metadata columns were dropped
+    df_all = pd.merge(df_all, df_athletes, on='Athlete_ID', how='left')
+    df_all = pd.merge(df_all, df_teams, on='Team_ID', how='left')
+    df_all['Team'] = df_all['Team_Name'].fillna('Unattached')
 
     df_all = df_all[df_all['Nationality'].str.upper() == 'CAN']
     df_all = df_all[~df_all['Rank'].astype(str).str.upper().isin(['DQ', 'DNF'])]
@@ -168,7 +174,7 @@ def load_data():
     def format_location(row):
         country = str(row['Country']).strip().upper()
         city = str(row['City']).strip()
-        prov = str(row['Prov_Race']).strip()
+        prov = str(row['Prov']).strip() # Can now reference exactly 'Prov' instead of 'Prov_Race'
         
         if country in ['CAN', 'USA']:
             return f"{city}, {prov}"
@@ -189,14 +195,13 @@ data = load_data()
 
 st.sidebar.header("Filter & Sort")
 
-# --- NEW: Sort Toggle ---
+# --- Sort Toggle ---
 sort_by = st.sidebar.radio("Sort By", ["Time", "WA Points"])
 
 # Distance Logic
 unique_numeric_dists = sorted(data['Distance'].dropna().astype(float).unique().tolist())
 display_dist_options = [format_distance_string(d) for d in unique_numeric_dists]
 
-# Only allow "All Distances" if they are sorting by WA points
 if sort_by == "WA Points":
     display_dist_options = ["All Distances"] + display_dist_options
 
@@ -212,7 +217,6 @@ selected_year = st.sidebar.selectbox("Year", ["All Years"] + years)
 if selected_display_dist == "All Distances":
     filtered_data = data[data['Gender'] == selected_gender].copy()
 else:
-    # Safely find the numeric distance value based on the selection
     offset = 1 if sort_by == "WA Points" else 0
     selected_numeric_dist = unique_numeric_dists[display_dist_options.index(selected_display_dist) - offset]
     
@@ -228,7 +232,6 @@ if selected_year != "All Years":
 if sort_by == "Time":
     filtered_data = filtered_data.sort_values(by='Exact_Seconds', ascending=True).reset_index(drop=True)
 else:
-    # Sort by WA points (highest to lowest), then exact seconds (fastest first) as a tie-breaker
     filtered_data = filtered_data.sort_values(by=['WA Points', 'Exact_Seconds'], ascending=[False, True]).reset_index(drop=True)
 
 # --- IDENTIFY PBs & ASSIGN RANK ---
@@ -246,14 +249,12 @@ for is_pb in filtered_data['Is_PB']:
 filtered_data.insert(0, 'Order', ranks)
 filtered_data = filtered_data.rename(columns={'Location': 'Competition Location'})
 
-# Clean up the Distance column for display so it shows "20km" instead of "20.0"
 filtered_data['Distance'] = filtered_data['Distance'].apply(format_distance_string)
 
 # --- DYNAMIC COLUMN SELECTION ---
 if sort_by == "Time":
     final_display_columns = ['Order', 'Mark', 'WA Points', 'Name', 'YOB', 'Team', 'Date', 'Competition Location', 'Is_PB']
 else:
-    # The requested column layout for WA Points sorting
     final_display_columns = ['Order', 'WA Points', 'Name', 'Mark', 'Distance', 'YOB', 'Team', 'Date', 'Competition Location', 'Is_PB']
 
 display_data = filtered_data[final_display_columns]
