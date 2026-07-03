@@ -57,7 +57,9 @@ def calculate_wa_points(gender, dist_num, surface, seconds, wa_table):
         return 0
         
     surf = str(surface).strip().title()
-    is_road = (surf == 'Road')
+    
+    # Force 21.1km (Half Marathon) to use Road Table logic even if run on a Track
+    is_road = (surf == 'Road') or math.isclose(dist_float, 21.1, abs_tol=0.01)
     
     scoring_seconds = math.ceil(seconds) if is_road else seconds
 
@@ -120,13 +122,20 @@ def load_data():
     df_teams = df_teams_raw[['Team_ID', 'Name']].rename(columns={'Name': 'Team_Name'})
     df_races = df_races_raw[['Race_ID', 'Distance', 'Date', 'City', 'Prov', 'Country', 'Surface']]
 
+    # Prepare main results (Filter out NT final results, along with DQ/DNF)
     df_main = pd.merge(df_results, df_races, on='Race_ID', how='left')
     df_main['Is_Split'] = False
+    df_main = df_main[~df_main['Rank'].astype(str).str.upper().isin(['DQ', 'DNF', 'NT'])]
 
+    # Prepare splits (Can process splits from NT races, but still drop DQ/DNF)
     if not df_splits.empty:
         df_splits_expanded = pd.merge(df_splits, df_results[['Result_ID', 'Athlete_ID', 'Team_ID', 'Race_ID', 'Rank']], on='Result_ID', how='inner')
         df_splits_expanded = pd.merge(df_splits_expanded, df_races.drop(columns=['Distance']), on='Race_ID', how='left')
         df_splits_expanded['Is_Split'] = True
+        
+        # Omit splits belonging to entirely DQ or DNF races, but allow NT splits
+        df_splits_expanded = df_splits_expanded[~df_splits_expanded['Rank'].astype(str).str.upper().isin(['DQ', 'DNF'])]
+        
         df_all = pd.concat([df_main, df_splits_expanded], ignore_index=True)
     else:
         df_all = df_main
@@ -136,10 +145,17 @@ def load_data():
     df_all['Team'] = df_all['Team_Name'].fillna('Unattached')
 
     df_all = df_all[df_all['Nationality'].str.upper() == 'CAN']
-    df_all = df_all[~df_all['Rank'].astype(str).str.upper().isin(['DQ', 'DNF'])]
 
     df_all['Exact_Seconds'] = (df_all['Hour'] * 3600) + (df_all['Min'] * 60) + df_all['Sec']
     df_all = df_all[df_all['Exact_Seconds'] > 0]
+
+    # --- EXPLICIT DISTANCE WHITELIST FILTER ---
+    # Only keep the specific distance metrics requested
+    allowed_dists = [1.5, 1.609, 3.0, 5.0, 10.0, 15.0, 20.0, 21.1, 30.0, 35.0, 42.2, 50.0]
+    
+    # Map whitelist checking cleanly across float conversion boundaries
+    df_all['Dist_Check'] = pd.to_numeric(df_all['Distance'], errors='coerce').round(3)
+    df_all = df_all[df_all['Dist_Check'].isin(allowed_dists)]
 
     df_all['WA Points'] = df_all.apply(
         lambda row: calculate_wa_points(row['Gender'], row['Distance'], row['Surface'], row['Exact_Seconds'], wa_table), 
@@ -279,7 +295,7 @@ if app_mode == "Leaderboards":
     st.dataframe(styled_dataframe, use_container_width=True)
 
 # ---------------------------------------------------------
-# NEW: ATHLETE PROFILES MODE
+# ATHLETE PROFILES MODE
 # ---------------------------------------------------------
 elif app_mode == "Athlete Profiles":
     
@@ -301,13 +317,11 @@ elif app_mode == "Athlete Profiles":
 
     # Apply Profile Distance Filter
     if selected_profile_dist != "All Distances":
-        # Map the selected string back to the float value
         selected_numeric_dist = unique_athlete_dists[profile_dist_options.index(selected_profile_dist) - 1]
         athlete_data = athlete_data[athlete_data['Distance'].astype(float) == selected_numeric_dist]
 
     # Apply Profile Sorting
     if profile_sort_by == "Date (Most Recent)":
-        # String sorting for YYYY-MM-DD works perfectly
         athlete_data = athlete_data.sort_values(by='Date', ascending=False)
     elif profile_sort_by == "Time (Fastest)":
         athlete_data = athlete_data.sort_values(by='Exact_Seconds', ascending=True)
@@ -325,7 +339,6 @@ elif app_mode == "Athlete Profiles":
     if athlete_data.empty:
         st.info(f"No results found for {selected_athlete} at this distance.")
     else:
-        # Quick Stats Row
         total_races = len(athlete_data)
         st.markdown(f"**Total Results Shown:** {total_races}")
         
