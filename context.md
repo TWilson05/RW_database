@@ -6,7 +6,7 @@ This document is a planning reference for future chats. It records the project's
 
 Build a continuously updated database of Canadian racewalking results and rankings, eventually presented through a web dashboard. It should preserve historical results as well as current performances, even when source information is incomplete.
 
-The next major step is an ingestion system for the existing Google Sheets database: an agent finds and interprets results from sources the user directs it to, then a script adds new data or helps resolve duplicates. The user can find and supply sources and may request a search of a particular website. Prepare a concrete design and recheck the live sheet before changing its schema or writing data; the inspection below is a snapshot and does not establish a merge policy.
+The existing ingestion workflow lets an agent find and interpret results from sources, then plan and apply reviewed changes to Google Sheets. The user can supply sources or request a search of a particular website. See [HANDOFF.md](HANDOFF.md) for coverage, priorities, and the next-session checklist; recheck the live sheet before writing.
 
 ## Existing project
 
@@ -18,6 +18,8 @@ The next major step is an ingestion system for the existing Google Sheets databa
 ## Working with the repository and data
 
 The dashboard opens the `Canadian Racewalk` spreadsheet using `gspread` and Streamlit's `gcp_service_account` secrets. Local service-account credentials and the spreadsheet ID are in the ignored `secrets/` directory; do not commit or print credential contents. The Sheets API can be accessed read-only with the service-account JSON and ID there. The dashboard caches data for 10 minutes. For local setup, install `requirements.txt`, configure Streamlit secrets, and run `streamlit run app.py`.
+
+`importer/plan.py` and `importer/apply.py` support agent-reviewed imports, documented in `importer/README.md`. Input can contain results grouped by race; the agent interprets sources, reviews matches, asks the user when uncertain, and applies a reviewed plan. Matching and audit checks are heuristic. Confirmed former athlete names can be persisted in `Note` using the limited `Previously listed as NAME.` convention recognized by the planner; team aliases are stored in `Aliases`. The Sheets writer does not lock against concurrent edits.
 
 ## Google Sheets structure
 
@@ -63,6 +65,8 @@ The dashboard uses `2025_lookup_table.json` to calculate points from gender, dis
 - **Split:** an intermediate distance and elapsed time linked to its parent result, not a separate race, competition or result. Eligible splits can appear in rankings with `+` after the time; retain the connection to the original performance.
 - **Source and provenance:** retain source references and enough original text or values to trace and review interpretations, conflicting reports, updates and duplicate decisions. Multiple sources can describe the same performance.
 
+Canadian affiliation can usually be assumed when supported by context, such as a Canadian national championship. Use competition year, reported two-digit years, age or school grade to infer a plausible birth year when the context supports it; document the inference and ask the user if the evidence remains uncertain. Do not present an inferred exact year as known when an age or grade permits multiple years. When a source states a birth year directly rather than an estimate inferred from age or grade, prefer the directly stated year and replace a small difference in the inferred value; retain the source and reasoning. If provenance or conflicting direct reports make the better value unclear, ask the user.
+
 Missing data is normal, especially for older records: do not invent birth years, full dates or other facts. Preserve the precision actually known (for example, a year without a day) and distinguish unknown values from guesses. Preserve raw reported marks and source details alongside normalized values where useful.
 
 ## Display and ranking requirements
@@ -77,11 +81,13 @@ Missing data is normal, especially for older records: do not invent birth years,
 
 Modern results often come from Athletics Canada rankings or World Athletics rankings; historical material may come from official results, re-reports or irregularly formatted text. Sources may be incomplete, inconsistent or duplicate one another. Respect source access restrictions and verify any extracted information against its source.
 
-A useful workflow should discover or accept source material, retain its reference, extract structured candidates, normalize dates, distances, marks and statuses without discarding their original form, validate links and missing fields, and compare candidates against existing athletes, races, results and splits. It should produce a reviewable plan of additions, updates, likely duplicates and conflicts before applying changes. Uncertain identity matches or conflicting facts should be surfaced for a decision, rather than silently merged or invented.
+When sources conflict on results, prefer official results over summaries and rankings where available; otherwise choose the best-supported source, with extra reported precision a useful but not conclusive clue. For names, prefer Canadian sources, especially Quebec sources for francophone athletes. World Athletics and Athletics Canada integrated databases are strong references, but an original official result can correct a transcription in a later ranking. For a minor discrepancy choose a provisional value, record competing values, sources, and why it needs verification, rather than omitting the result. Do not treat an unconfirmed spelling as a confirmed identity alias. Ask when an uncertain identity match or substantive ambiguity risks merging different people or races. Other sources can supply additional context and performances. The user's separate convention for small race-date discrepancies (use the later date) still applies. Rachel Seaman, born in 1986, previously competed as Rachel Lavallée; these names refer to one athlete.
+
+A useful workflow should discover or accept source material, retain its reference, extract structured candidates, normalize dates, distances, marks and statuses without discarding their original form, validate links and missing fields, and compare candidates against existing athletes, races, results and splits. It should produce a reviewable plan of additions, updates, likely duplicates and conflicts before applying changes. Record minor unresolved source conflicts and import a clearly identified provisional value, following the source preference above. Surface uncertain identity matches and substantive ambiguity for a decision rather than silently merging or inventing facts.
 
 Duplicate detection should use multiple independent clues where available: source identifiers, name variants and aliases, birth year, affiliation, dates, location, distance, marks and competition details. For example, Ben and Benjamin may be the same athlete, but a nickname or similar mark alone is not proof. Handle duplicate sources separately from duplicate entities and performances, preserve provenance when consolidating, and make changes auditable and recoverable. Reprocessing the same source should not create duplicate records. Use stable IDs and avoid destructive overwrites when evidence is uncertain.
 
-The exact confidence thresholds, source precedence, review/approval workflow, backup strategy and Sheets write mechanics remain to be designed with the live data and the findings below in mind. Avoid storing credentials in the repository or this document.
+The current workflow, safeguards, backup strategy, and their limitations are described in [importer/README.md](importer/README.md); confidence thresholds and a structured provenance store remain open design work. Avoid storing credentials in the repository or this document.
 
 ## Open questions for planning
 
@@ -91,3 +97,11 @@ The exact confidence thresholds, source precedence, review/approval workflow, ba
 4. What constitutes a best performance per athlete when distances, surfaces, categories or years differ? How should ties be displayed?
 5. How should incomplete dates, uncertain identities, conflicting source claims and corrections be reviewed and recorded? Which changes may be automatic?
 6. What is the desired scope for Canadian affiliation over time, and how should historical changes in country, team or athlete details be represented?
+
+## Meet date convention
+
+When the day of a race at a multi-day meet is unknown, use the final day of the meet as an assumed date, following Athletics Canada rankings, and record that it is an assumption. When plausible reports of the same race differ by one or a few days, use the later date, including when the reports come from Athletics Canada and World Athletics. Confirm the athlete and race match first, and retain the conflicting source information; do not apply this rule to potentially separate races or larger unexplained differences.
+
+The user generally does not require retaining annotations such as X, >, ~ or meet records. For international competitions, import only Canadian athletes' results unless full fields are explicitly requested, and generally limit stored splits to Canadian athletes at relevant ranking distances. Ignore DNS and relay events. Include the 1906 Intercalated Games when reviewing historical Olympic-related results.
+
+When existing data conflicts with official results, prefer the official source; the original data may contain transcription errors. Preserve fractional road times when reported, leaving display rounding to the dashboard. Keep source details and verify the actual event and athlete before correcting an existing row.

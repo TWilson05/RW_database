@@ -1,0 +1,29 @@
+{
+  "source": "https://example.org/official-results",
+  "races": [
+    {
+      "race": {
+        "id": 1
+      },
+      "results": [
+        {
+          "athlete": {
+            "id": 1,
+            "YOB": 1990
+          },
+          "team": {
+            "id": 0
+          },
+          "rank": 1,
+          "time": "1:23:28.30",
+          "splits": [
+            {
+              "distance": 10,
+              "time": "41:30"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
