@@ -120,21 +120,21 @@ def load_data():
     # --- PRE-FILTER TO AVOID COLUMN COLLISIONS ---
     df_athletes = df_athletes_raw[['Athlete_ID', 'Name', 'Gender', 'YOB', 'Nationality']]
     df_teams = df_teams_raw[['Team_ID', 'Name']].rename(columns={'Name': 'Team_Name'})
-    df_races = df_races_raw[['Race_ID', 'Distance', 'Date', 'City', 'Prov', 'Country', 'Surface']]
+    df_races = df_races_raw[['Race_ID', 'Distance', 'Date', 'City', 'Prov', 'Country', 'Surface']].copy()
+    df_races['Race_Distance'] = df_races['Distance']
 
-    # Prepare main results (Filter out NT final results, along with DQ/DNF)
+    # Prepare final results, including unfinished races for profiles
     df_main = pd.merge(df_results, df_races, on='Race_ID', how='left')
     df_main['Is_Split'] = False
-    df_main = df_main[~df_main['Rank'].astype(str).str.upper().isin(['DQ', 'DNF', 'NT'])]
 
-    # Prepare splits (Can process splits from NT races, but still drop DQ/DNF)
+
+    # Prepare splits and retain their parent result IDs
     if not df_splits.empty:
         df_splits_expanded = pd.merge(df_splits, df_results[['Result_ID', 'Athlete_ID', 'Team_ID', 'Race_ID', 'Rank']], on='Result_ID', how='inner')
         df_splits_expanded = pd.merge(df_splits_expanded, df_races.drop(columns=['Distance']), on='Race_ID', how='left')
         df_splits_expanded['Is_Split'] = True
         
-        # Omit splits belonging to entirely DQ or DNF races, but allow NT splits
-        df_splits_expanded = df_splits_expanded[~df_splits_expanded['Rank'].astype(str).str.upper().isin(['DQ', 'DNF'])]
+
         
         df_all = pd.concat([df_main, df_splits_expanded], ignore_index=True)
     else:
@@ -146,26 +146,27 @@ def load_data():
 
     df_all = df_all[df_all['Nationality'].str.upper() == 'CAN']
 
+    for col in ['Hour', 'Min', 'Sec']:
+        df_all[col] = pd.to_numeric(df_all[col], errors='coerce').fillna(0)
     df_all['Exact_Seconds'] = (df_all['Hour'] * 3600) + (df_all['Min'] * 60) + df_all['Sec']
-    df_all = df_all[df_all['Exact_Seconds'] > 0]
+    df_all = df_all[(~df_all['Is_Split']) | (df_all['Exact_Seconds'] > 0)]
 
-    # --- EXPLICIT DISTANCE WHITELIST FILTER ---
-    # Only keep the specific distance metrics requested
-    allowed_dists = [1.5, 1.609, 3.0, 5.0, 10.0, 15.0, 20.0, 21.1, 30.0, 35.0, 42.2, 50.0]
-    
-    # Map whitelist checking cleanly across float conversion boundaries
+    # Normalize distances for leaderboard filtering and personal bests.
     df_all['Dist_Check'] = pd.to_numeric(df_all['Distance'], errors='coerce').round(3)
-    df_all = df_all[df_all['Dist_Check'].isin(allowed_dists)]
+    # Keep other distances for complete athlete profiles; leaderboards use the whitelist.
 
     df_all['WA Points'] = df_all.apply(
-        lambda row: calculate_wa_points(row['Gender'], row['Distance'], row['Surface'], row['Exact_Seconds'], wa_table), 
+        lambda row: calculate_wa_points(row['Gender'], row['Distance'], row['Surface'], row['Exact_Seconds'], wa_table) if row['Exact_Seconds'] > 0 and (row['Is_Split'] or str(row['Rank']).strip().upper() not in ['DQ', 'DNF', 'NT']) else 0, 
         axis=1
     )
 
     def format_mark(row):
         total_s = row['Exact_Seconds']
         surf = str(row['Surface']).strip().title()
-        
+        status = str(row['Rank']).strip().upper()
+        if not row['Is_Split'] and (status in ['DQ', 'DNF', 'NT'] or total_s <= 0):
+            return status if status in ['DQ', 'DNF', 'NT'] else 'NT'
+
         if surf == 'Road':
             total_s = math.ceil(total_s)
             hh = int(total_s // 3600)
@@ -198,150 +199,115 @@ def load_data():
 
     df_all['Year'] = pd.to_datetime(df_all['Date'], errors='coerce').dt.year
 
-    backend_cols = ['Name', 'Gender', 'Mark', 'WA Points', 'Distance', 'Date', 'Location', 'Exact_Seconds', 'Year', 'YOB', 'Team']
+    backend_cols = ['Athlete_ID', 'Result_ID', 'Race_ID', 'Rank', 'Is_Split', 'Race_Distance', 'Dist_Check', 'Name', 'Gender', 'Mark', 'WA Points', 'Distance', 'Date', 'Location', 'Exact_Seconds', 'Year', 'YOB', 'Team']
     return df_all[backend_cols]
 
 # 4. Building the User Interface
 st.title("Canadian Racewalking Database")
 data = load_data()
 
-# --- APP NAVIGATION ---
 st.sidebar.header("Navigation")
-app_mode = st.sidebar.radio("Go to:", ["Leaderboards", "Athlete Profiles"])
-
+if 'app_mode' not in st.session_state:
+    st.session_state.app_mode = "Leaderboards"
+st.sidebar.radio("Go to:", ["Leaderboards", "Athlete Profiles"], key='app_mode')
 st.sidebar.divider()
 
-if app_mode == "Leaderboards":
-    st.write("All-time performances for Canadian athletes.")
+if st.session_state.app_mode == "Leaderboards":
+    st.write("All-time performances for Canadian athletes. Select an athlete's row to open their profile.")
     st.sidebar.header("Filter & Sort")
-
-    # --- Sort Toggle ---
     sort_by = st.sidebar.radio("Sort By", ["Time", "WA Points"])
-
-    # Distance Logic
-    unique_numeric_dists = sorted(data['Distance'].dropna().astype(float).unique().tolist())
+    best_only = st.sidebar.checkbox("Only show best by athlete")
+    allowed_dists = [1.5, 1.609, 3.0, 5.0, 10.0, 15.0, 20.0, 21.1, 30.0, 35.0, 42.2, 50.0]
+    leaderboard = data[data['Dist_Check'].isin(allowed_dists) & (data['Exact_Seconds'] > 0) & (data['Is_Split'] | ~data['Rank'].astype(str).str.strip().str.upper().isin(['DQ', 'DNF', 'NT']))]
+    unique_numeric_dists = sorted(leaderboard['Distance'].dropna().astype(float).unique().tolist())
     display_dist_options = [format_distance_string(d) for d in unique_numeric_dists]
-
     if sort_by == "WA Points":
         display_dist_options = ["All Distances"] + display_dist_options
-
     selected_display_dist = st.sidebar.selectbox("Distance", display_dist_options)
-
-    genders = sorted(data['Gender'].dropna().unique().tolist())
+    genders = sorted(leaderboard['Gender'].dropna().unique().tolist())
     selected_gender = st.sidebar.selectbox("Gender", genders)
-
-    years = sorted(data['Year'].dropna().astype(int).unique().tolist(), reverse=True)
+    years = sorted(leaderboard['Year'].dropna().astype(int).unique().tolist(), reverse=True)
     selected_year = st.sidebar.selectbox("Year", ["All Years"] + years)
 
-    # --- APPLY FILTERS ---
-    if selected_display_dist == "All Distances":
-        filtered_data = data[data['Gender'] == selected_gender].copy()
-    else:
+    filtered_data = leaderboard[leaderboard['Gender'] == selected_gender].copy()
+    if selected_display_dist != "All Distances":
         offset = 1 if sort_by == "WA Points" else 0
-        selected_numeric_dist = unique_numeric_dists[display_dist_options.index(selected_display_dist) - offset]
-        
-        filtered_data = data[
-            (data['Distance'].astype(float) == selected_numeric_dist) & 
-            (data['Gender'] == selected_gender)
-        ].copy()
-
+        distance = unique_numeric_dists[display_dist_options.index(selected_display_dist) - offset]
+        filtered_data = filtered_data[filtered_data['Distance'].astype(float) == distance]
     if selected_year != "All Years":
         filtered_data = filtered_data[filtered_data['Year'] == selected_year]
-
-    # --- APPLY SORTING ---
     if sort_by == "Time":
-        filtered_data = filtered_data.sort_values(by='Exact_Seconds', ascending=True).reset_index(drop=True)
+        filtered_data = filtered_data.sort_values('Exact_Seconds')
     else:
-        filtered_data = filtered_data.sort_values(by=['WA Points', 'Exact_Seconds'], ascending=[False, True]).reset_index(drop=True)
-
-    # --- IDENTIFY PBs & ASSIGN RANK ---
-    filtered_data['Is_PB'] = ~filtered_data.duplicated(subset=['Name'], keep='first')
-
-    ranks = []
-    current_rank = 1
-    for is_pb in filtered_data['Is_PB']:
-        if is_pb:
-            ranks.append(str(current_rank))
-            current_rank += 1
-        else:
-            ranks.append("") 
-
-    filtered_data.insert(0, 'Order', ranks)
-    filtered_data = filtered_data.rename(columns={'Location': 'Competition Location'})
-
+        filtered_data = filtered_data.sort_values(['WA Points', 'Exact_Seconds'], ascending=[False, True])
+    filtered_data = filtered_data.reset_index(drop=True)
+    filtered_data['Is_PB'] = ~filtered_data.duplicated(subset=['Athlete_ID'])
+    filtered_data['Order'] = filtered_data['Is_PB'].cumsum().where(filtered_data['Is_PB'], '').astype(str)
+    if best_only:
+        filtered_data = filtered_data[filtered_data['Is_PB']].copy()
+    filtered_data = filtered_data.reset_index(drop=True)
     filtered_data['Distance'] = filtered_data['Distance'].apply(format_distance_string)
+    filtered_data = filtered_data.rename(columns={'Location': 'Competition Location', 'Rank': 'Finish'})
+    columns = ['Order', 'Mark', 'WA Points', 'Name', 'YOB', 'Team', 'Date', 'Competition Location', 'Finish']
+    if sort_by == "WA Points":
+        columns = ['Order', 'WA Points', 'Name', 'Mark', 'Distance', 'YOB', 'Team', 'Date', 'Competition Location', 'Finish']
 
-    # --- DYNAMIC COLUMN SELECTION ---
-    if sort_by == "Time":
-        final_display_columns = ['Order', 'Mark', 'WA Points', 'Name', 'YOB', 'Team', 'Date', 'Competition Location', 'Is_PB']
-    else:
-        final_display_columns = ['Order', 'WA Points', 'Name', 'Mark', 'Distance', 'YOB', 'Team', 'Date', 'Competition Location', 'Is_PB']
-
-    display_data = filtered_data[final_display_columns]
-
-    # --- Apply Bold Styling ---
     def highlight_pb(row):
-        if row['Is_PB']:
-            return ['font-weight: bold'] * len(row)
-        return [''] * len(row)
+        return ['font-weight: bold' if filtered_data.loc[row.name, 'Is_PB'] else '' for _ in row]
 
-    styled_dataframe = (
-        display_data.style
-        .apply(highlight_pb, axis=1)
-        .hide(subset=['Is_PB'], axis="columns")
-        .hide(axis="index")
+    selection = st.dataframe(
+        filtered_data[columns].style.apply(highlight_pb, axis=1),
+        use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row",
+        key='leaderboard_table',
     )
+    if selection.selection.rows:
+        selected_row = selection.selection.rows[0]
+        if selected_row < len(filtered_data):
+            st.session_state.selected_athlete_id = filtered_data.iloc[selected_row]['Athlete_ID']
+            st.session_state.app_mode = "Athlete Profiles"
+            st.rerun()
 
-    st.dataframe(styled_dataframe, use_container_width=True)
-
-# ---------------------------------------------------------
-# ATHLETE PROFILES MODE
-# ---------------------------------------------------------
-elif app_mode == "Athlete Profiles":
-    
+else:
+    if 'leaderboard_table' in st.session_state:
+        del st.session_state['leaderboard_table']
     st.sidebar.header("Profile Settings")
-    
-    # Athlete Search Dropdown
-    all_athletes = sorted(data['Name'].dropna().unique().tolist())
-    selected_athlete = st.sidebar.selectbox("Search Athlete", all_athletes)
-    
-    # Filter data for the specific athlete
-    athlete_data = data[data['Name'] == selected_athlete].copy()
-    
-    # Profile Filters
-    unique_athlete_dists = sorted(athlete_data['Distance'].dropna().astype(float).unique().tolist())
-    profile_dist_options = ["All Distances"] + [format_distance_string(d) for d in unique_athlete_dists]
-    
-    selected_profile_dist = st.sidebar.selectbox("Filter Distance", profile_dist_options)
-    profile_sort_by = st.sidebar.radio("Sort Results By", ["Date (Most Recent)", "Time (Fastest)", "WA Points (Highest)"])
+    athletes = data[['Athlete_ID', 'Name']].drop_duplicates().sort_values(['Name', 'Athlete_ID'])
+    athlete_ids = athletes['Athlete_ID'].tolist()
+    names = athletes.set_index('Athlete_ID')['Name'].to_dict()
+    if st.session_state.get('selected_athlete_id') not in athlete_ids:
+        st.session_state.selected_athlete_id = athlete_ids[0]
+    selected_id = st.sidebar.selectbox(
+        "Search Athlete", athlete_ids, format_func=lambda athlete_id: names[athlete_id],
+        key='selected_athlete_id',
+    )
+    athlete_data = data[data['Athlete_ID'] == selected_id].copy()
+    st.subheader(f"Results Profile: {names[selected_id]}")
 
-    # Apply Profile Distance Filter
-    if selected_profile_dist != "All Distances":
-        selected_numeric_dist = unique_athlete_dists[profile_dist_options.index(selected_profile_dist) - 1]
-        athlete_data = athlete_data[athlete_data['Distance'].astype(float) == selected_numeric_dist]
+    st.markdown("### Personal bests")
+    pbs = (athlete_data[(athlete_data['Exact_Seconds'] > 0) & (athlete_data['Is_Split'] | ~athlete_data['Rank'].astype(str).str.strip().str.upper().isin(['DQ', 'DNF', 'NT']))].sort_values('Exact_Seconds')
+           .drop_duplicates(subset=['Dist_Check'])
+           .sort_values('Dist_Check').copy())
+    pbs['Distance'] = pbs['Distance'].apply(format_distance_string)
+    st.dataframe(pbs[['Distance', 'Mark', 'WA Points', 'Date', 'Location', 'Rank']].rename(
+        columns={'Rank': 'Finish'}), use_container_width=True, hide_index=True)
 
-    # Apply Profile Sorting
-    if profile_sort_by == "Date (Most Recent)":
-        athlete_data = athlete_data.sort_values(by='Date', ascending=False)
-    elif profile_sort_by == "Time (Fastest)":
-        athlete_data = athlete_data.sort_values(by='Exact_Seconds', ascending=True)
-    elif profile_sort_by == "WA Points (Highest)":
-        athlete_data = athlete_data.sort_values(by=['WA Points', 'Exact_Seconds'], ascending=[False, True])
-
-    athlete_data = athlete_data.reset_index(drop=True)
-    
-    # Format distances cleanly before display
-    athlete_data['Distance'] = athlete_data['Distance'].apply(format_distance_string)
-
-    # --- RENDER PROFILE UI ---
-    st.subheader(f"Results Profile: {selected_athlete}")
-    
-    if athlete_data.empty:
-        st.info(f"No results found for {selected_athlete} at this distance.")
-    else:
-        total_races = len(athlete_data)
-        st.markdown(f"**Total Results Shown:** {total_races}")
-        
-        # Display the Profile Table
-        profile_display_cols = ['Date', 'Distance', 'Mark', 'WA Points', 'Location', 'Team']
-        st.dataframe(athlete_data[profile_display_cols], use_container_width=True, hide_index=True)
+    st.markdown("### Results by year")
+    # A result can have splits even when its final mark was recorded as NT.
+    races = athlete_data.sort_values(['Is_Split', 'Dist_Check']).drop_duplicates('Result_ID')
+    races = races.sort_values('Date', ascending=False)
+    for year, year_races in races.groupby('Year', sort=False, dropna=False):
+        st.markdown(f"#### {int(year) if pd.notna(year) else 'Unknown year'}")
+        for _, race in year_races.iterrows():
+            parts = athlete_data[athlete_data['Result_ID'] == race['Result_ID']]
+            final = parts[~parts['Is_Split']]
+            mark = final.iloc[0]['Mark'] if not final.empty else 'NT'
+            distance = format_distance_string(race['Race_Distance'])
+            label = f"{race['Date']} ? {distance} ? {race['Location']} ? {mark} ? Finish: {race['Rank']}"
+            with st.expander(label):
+                st.write(f"Team: {race['Team']}")
+                splits = parts[parts['Is_Split']].sort_values('Dist_Check').copy()
+                if not splits.empty:
+                    splits['Distance'] = splits['Distance'].apply(format_distance_string)
+                    st.dataframe(splits[['Distance', 'Mark', 'WA Points']], use_container_width=True, hide_index=True)
+                else:
+                    st.caption("No splits recorded.")
